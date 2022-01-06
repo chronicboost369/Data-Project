@@ -2,7 +2,9 @@
 title: "House Price Prediction"
 author: "Jung Hyun Kim"
 date: "12/23/2021"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -10,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r, include=FALSE}
-setwd("C:/Users/imdajhk/Desktop/jhk/Competition_Kaggle/House Prices")
+setwd("E:/jhk/Competition_Kaggle/House Prices")
 
 
 # Loading Libraries
