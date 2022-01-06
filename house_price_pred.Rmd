@@ -1,0 +1,543 @@
+---
+title: "House Price Prediction"
+author: "Jung Hyun Kim"
+date: "12/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+setwd("C:/Users/imdajhk/Desktop/jhk/Competition_Kaggle/House Prices")
+
+
+# Loading Libraries
+library("tidyverse")
+
+```
+
+## Data Cleaning
+
+```{r}
+train<- read.csv("train.csv")
+test <- read.csv("test.csv")
+
+dim(train)
+dim(test)
+#Combining train and test for data cleaning purpose
+which(!colnames(train)%in%colnames(test))
+colnames(train)[81]
+
+# because test is lacking 2 columns
+test$SalePrice <- 0
+
+# Data Cleaning
+data <- data.frame(rbind(train,test))
+
+# chr to factor
+
+
+
+
+```
+
+The output above shows the number of missing observations("NA") for each variables in the dataset.
+
+LotFrontage is a variable for linear feet of street connected to property, which indicates a home's accessibility. The value NA could mean either missing value or literally no access to a street, which sounds illogical given that a fact that the land that houses were built on is owned by the home owners.
+
+### Evaluating Lot Frontage
+
+```{r}
+summary(data$LotFrontage)
+```
+
+The 5 number summary above shows that NA's are more likely to be missing values. For this case, KNN is used to replace NA's.
+
+```{r, warning=FALSE, message= FALSE}
+library("VIM")
+
+data <- kNN(data, variable= "LotFrontage", k=5, imp_var=FALSE, imp_suffix = NULL)
+
+```
+
+Alley can be left as it is based on the data description.
+
+```{r}
+data[which(is.na(data$Alley)),"Alley"] <- "None"
+```
+
+NA for "MasVnrType" is replaced with "None"
+
+```{r}
+data[which(is.na(data$MasVnrType)), "MasVnrType"] <- "None"
+
+
+```
+
+For Exterior1st, it's hard to replace NA since levels are categorical without anything ambiguous like "None". Hence, the NA row is removed. This is reasonable because it's only 1 observation, and the variable might be useful(probably not for regression because of too many levels).
+
+Same approach was taken for Exterior2nd
+
+```{r}
+c(which(is.na(data$Exterior1st)),which(is.na(data$Exterior2nd))) # same row 2152
+
+data <- data[-which(is.na(data$Exterior1st)),]
+
+```
+
+For all other variables, if missing value is fewer than 5, all of them will be removed
+
+```{r}
+colSums(is.na(data)) # current na obs. for each variables
+varnames <- names(data)[(colSums(is.na(data))>=1 &colSums(is.na(data))<=5)] # any variables =1 and less than 5
+
+#replacing na's with KNN
+for(i in varnames){
+  a <-which(is.na(data[,i]))
+  data <- kNN(data, variable= i, k=5,imp_var=FALSE, imp_suffix = NULL)
+}
+
+
+
+```
+
+MasVnrArea should be replaced with KNN since it's Masonry veneer area in square feet.
+
+```{r}
+data <- kNN(data,"MasVnrArea",k=5,imp_var=FALSE, imp_suffix = NULL)
+
+
+```
+
+All remaining variables are replaced with kNN
+
+```{r}
+varnames2 <- names(data)[colSums(is.na(data))>0]
+
+for ( i in varnames2){
+  data <- kNN(data,i,k=5,imp_var=FALSE, imp_suffix = NULL)
+}
+
+
+```
+
+# Converting character variables to factors
+```{r}
+data[colnames(Filter(is.character,(data)))] <-lapply(data[colnames(Filter(is.character,(data)))],factor)
+```
+
+
+# simple OLS
+
+```{r}
+
+data <- data[,-1] #removing ID column as it is unecessary
+
+ 
+
+ols <- lm(SalePrice~., data = data[1:nrow(train),])
+summary(ols)
+
+
+
+sort(ols$coefficients,decreasing = T )
+plot(ols)
+
+```
+
+Because of many categorical variables with multiple levels ( greater than 2), there are 243 variables when accounting dummy variables. This is not a desirable because it's offsetting one of strengths of simple regression model which showing relationship between explanatory variables and the response variable. For this purpose of analysis, the major focus is accuracy so test MSE is the only measurement used to measure the strength of a model.Furthermore, because normality assumption of residuals is violated as shown in the qqplot of residuals, this OLS doesn't show any relationships between variables.
+
+```{r}
+pred.ols <- predict(ols,newdata=data[(nrow(train)+1):nrow(data),])
+```
+
+The warning message indicates that there could be potential of multicollinearity which may lead to having rank less than the number of parameters in the model. Multicollinearity should be avoided to prevent the inflation of F-test statistics, and generate a reliable coefficients for each variables in the model. As previously mentioned, only test MSE is considered.
+
+```{r}
+test.sale <- read.csv("sample_submission.csv")
+test.sale <- test.sale[-692,] # removing the 2152th row of the combined data because of the removal done earlier
+nrow(test.sale)
+
+sqrt(mean((pred.ols - test.sale$SalePrice)^2)) # Test MSE
+
+
+
+```
+
+The RMSE is about \$77,000, which is quiet high in my opinion. Let's suppose there is a house with a true intrinsic value of \$500,000. Such value is absolutely correct. With this model, the house could be valued at either \$10,000 or \$990,000, which shows that such model is not reliable at all. The main reason for this could be that the initial model is overfitting the training data, so when a new data is introduced, it is not adequately accounting them.
+
+# Improving OLS with stepwise
+
+Stepwise regression is a method of dropping insignificant variables. There are multiple methods, but in this analysis, forward method is used. Forward method only includes additional variable if and only if adding a variable enhances the model evaluated by F-partial test.
+
+```{r, include=FALSE}
+library(leaps)
+tmp<-regsubsets(mpg ~ wt + drat + disp + qsec, data=mtcars, nbest=1000, really.big=T, intercept=F)
+all.mods <- summary(tmp)[[1]]
+all.mods <- lapply(1:nrow(all.mods), function(x) as.formula(paste("mpg~", paste(names(which(all.mods[x,])), collapse="+"))))
+
+head(all.mods)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(MASS)
+
+stepfor <- stepAIC(ols,direction="both",trace=F)
+
+
+sqrt(mean((predict(stepfor,newx=data[(nrow(train)+1):nrow(data),])- test.sale$SalePrice)^2))
+
+
+```
+
+# Lasso Regression
+
+Because the data contains many predictors which may possess multicollinearity, lasso regression is tested. Like the ridge regression, it solves multicollinearity by lowering the values of coefficients. Additionally, lasso removes insignificant variables.
+
+```{r, warning= F, message=F}
+library("glmnet")
+# Finding the best value of lambda
+
+data.lasso <- scale(model.matrix(SalePrice~.,data=data))
+y <- (data$SalePrice) #response variable
+
+#finding the best lamdba value with 5-fold cv
+set.seed(20220103)
+lasso <- cv.glmnet(data.lasso[1:nrow(train),],y[1:nrow(train)],alpha=1,thresh=1e-23, nfolds=5)
+ # the value of lambda that gives the lowest mean cross validated error
+
+lasso.mod <- glmnet(data.lasso[1:nrow(train),],y[1:nrow(train)],alpha=1,thresh=1e-23,lambda = min(lasso$lambda.min))
+
+lasso.pred <- predict(lasso.mod,newx=data.lasso[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((lasso.pred-test.sale$SalePrice)^2))
+
+```
+
+The main purpose of using lasso regression is to reduce variance by restraining magnitude of variables, even to 0 for some at the cost of increasing bias. The bias might be a structural problem this data contains like having less significant variables either in the dataset or the model. At this stage, the latter might be true because EDA wasn't conducted to select variables. Instead, random selections were done with stepwise then some random selection with coefficient coercition through lasso. Lastly, random forest is tested. Random forest takes subset of variables to split tree. During this process, the hierarchical order of variables is constructed, and having many trees could further reduce the variance by increasing the sample size.
+
+# Random Forest
+```{r, message=F, warning=F}
+library("randomForest")
+
+rf <- randomForest(SalePrice~., data=data[1:nrow(train),], mtry=floor((ncol(data)-1)/3), importance=T)
+
+
+rf.pred <- predict(rf,newdata=data[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((rf.pred-test.sale$SalePrice)^2))
+```
+
+RMSE has improved but still reasonably big in my opinion.
+
+```{r}
+
+sort(importance(rf)[,1],decreasing = T)
+     
+```
+The numbers above show the order of important variables sorted by decrease in training MSE when not included. The negative values mean that excluding them will increase training MSE. One can genuinely inference that choosing selecting predictors based on this is viable since EDA might be challenging when the dataset has around 80 predictors.
+
+```{r}
+
+
+important.var <- names(sort(importance(rf)[,1],decreasing = T)>5) # names of variables that have greater than 5 decrease in MSE when not included
+```
+
+# Tests with only important Var
+```{r}
+data2 <- data.frame(cbind(data$SalePrice, data[,important.var]))
+ols2 <- lm(data.SalePrice~.,data=data2[1:nrow(train),])
+
+ols2.pred <- predict(ols2,newdata=data2[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((ols2.pred-test.sale$SalePrice)^2)) # lower than the original but high
+
+data2.lasso <- scale(model.matrix(data.SalePrice~.,data=data2))
+y2 <- data2$data.SalePrice
+
+set.seed(20220103)
+lasso2 <- cv.glmnet(data2.lasso[1:nrow(train),],y[1:nrow(train)],alpha=1,thresh=1e-23, nfolds=5)
+ # the value of lambda that gives the lowest mean cross validated error
+
+lasso.mod2 <- glmnet(data2.lasso[1:nrow(train),],y2[1:nrow(train)],alpha=1,thresh=1e-23,lambda = min(lasso2$lambda.min))
+
+lasso.pred2 <- predict(lasso.mod2,newx=data2.lasso[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((lasso.pred2-test.sale$SalePrice)^2)) # better than before 
+
+#rf
+rf2 <- randomForest(data.SalePrice~., data=data2[1:nrow(train),], mtry=floor(ncol(data2)/3), importance=T)
+
+
+rf.pred2 <- predict(rf2,newdata=data2[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((rf.pred2-test.sale$SalePrice)^2))
+
+
+```
+
+# EDA
+
+
+
+```{r, warning=F, message=F}
+library("corrplot")
+
+train.f <- data[1:nrow(train),]
+
+train.f.num <- Filter(is.numeric,train.f)
+
+#abs(cor(train.f.num))>=0.85 & abs(cor(train.f.num))<1
+
+
+
+
+
+```
+GarageArea and GarageCars have higher correlation than 0.85 so likely to cause multicollinearity issue. Hence, GarageCars is removed because GarageArea is more self explanatory.
+
+# Dropping GarageCars
+```{r}
+data <- dplyr::select(data,-GarageCars)
+train.f.num <- Filter(is.numeric,data)
+
+```
+
+# Nonlinearity
+
+## Spear's Rank Correlation
+```{r}
+
+# Spear's Rank Correlation
+
+#which(colnames(train.f.num)=="SalePrice") 36 is the column number of SalePrice
+
+num.col.n <- colnames(train.f.num)[1:35] 
+
+scor <- matrix(NA,nrow=35)
+
+
+for( i in 1:35){
+  scor[i] <- cor(rank(train.f.num$SalePrice),rank(train.f.num[,i]))
+}
+
+rownames(scor) <- num.col.n
+colnames(scor) <- "SalePrice"
+
+scor[rank(scor)]
+rownames(scor)[rank(scor)]
+
+
+hist(scor, main= "Spear's Rank Cor")
+
+```
+
+The histogram shows Spear's rank correlation between SalePrice and each numeric variables to identify nonlinear relatinoship between them. Since these values lie between -0.1 and 0.25, it's hard to state that there's nonlinear relationship to introduce higher order terms.To veritfy this result, Kendall's Tau correlation is also checked.
+
+## Kendall's Tau correlation
+```{r}
+
+Tau <- function(x,y){
+  n <- length(x)
+  mat <- cbind(x,y)
+  mat <- mat[order(mat[,1]),]
+  concord <- 0
+  for(i in 1:(n-1)){
+    for(j in (i+1):n)
+    {
+      tmp = (x[i]-x[j])*(y[i]-y[j])
+      concord = concord + 1*(tmp>0) + 1/2*(tmp==0)	
+    }
+  }
+  2*concord/(n*(n-1)/2) - 1
+}
+
+tcor <- matrix(NA,nrow=35)
+
+for (i in 1:35){
+  tcor[i] <- Tau(train.f.num$SalePrice, train.f.num[,i])
+} 
+
+tcor
+
+```
+
+Kendall's Tau is also not showing significant nonlinearity between SalePrice and numeric variables. Hence, it's hard to justify using higher order terms.
+
+# Interaction between continuous variables
+
+To identify if interactions between continuous variables exist, conditional plot is used. Since there are 35 numeric predictors, there are 595 pairs need to be evaluated for possible interactions which is extremely time consuming. To focus on few, randomforest is used with only numeric predictors to identify the most important predictors. Then, interactions will be evaluated.
+
+```{r}
+set.seed(20220105)
+rfnum <- randomForest(SalePrice ~., data=train.f.num, mtry=floor((ncol(data)-1)/3))
+varImpPlot(rfnum)
+imp5 <- names(sort(importance(rfnum)[,1],decreasing = T))[1:5] 
+```
+
+The most important 5 predictors will be evaluated.
+
+```{r, warning=F,message=F}
+library("lattice")
+
+colnames(train.f.num)
+
+for(i in 1:5){
+  if( i <5){
+  for (j in 1:5){
+    if(j>i){
+   coplot(as.formula(paste(paste(paste("SalePrice~",imp5[i]),"|"),imp5[j])),  
+       number = 4, rows = 1,
+       panel = panel.smooth, data=train.f.num)
+  }
+  }
+  }
+}
+
+
+
+
+
+
+```
+
+On the plot, interaction is shown if the trend of subdivided data by another predictor is signified to either direction when the value of such predictor is increased. 
+
+GrLivArea & Lot Area
+The relationship hasn't signified. Thus, no interaction.
+
+GrLivArea & TotalBsmtSF
+The relationship hasn't signified. Thus, no interaction.
+
+GrLivArea & BsmtFinSF1
+The relationship hasn't signified. Thus, no interaction.
+
+GrLivArea & BsmtUnfSF
+The relationship hasn't signified. Thus, no interaction.
+
+LotArea & TotalBsmtSF
+The relationship hasn't signified. Thus, no interaction.
+
+LotArea & BsmtUnfSF
+The relationship hasn't signified. Thus, no interaction.
+
+TotalBsmtSF & BsmftFinSF1
+The relationship has. Thus, interaction exists.
+
+TotalBsmtSF & BsmtUnfSF
+The relationship has. Thus, interaction exists.
+
+BsmtFinSF1 & BsmtUnfSF
+The relationship hasn't signified. Thus, no interaction.
+
+## Testing interaction
+
+```{r}
+
+
+var.int <- paste(colnames(train.f.num[1:35]),"+")
+
+ols.int <- lm(as.formula(c("SalePrice ~",var.int,"TotalBsmtSF * BsmtUnfSF +","TotalBsmtSF * BsmtUnfSF")), data=train.f.num)
+
+sqrt(mean((predict(ols.int,newdata=data[(nrow(train)+1):nrow(data),]) - test.sale$SalePrice)^2))
+
+sqrt(mean((predict(lm(SalePrice~.,data=train.f.num),newdata=data[(nrow(train)+1):nrow(data),]) - test.sale$SalePrice)^2))
+
+
+set.seed(20220105)
+rf.interact <- randomForest(as.formula(c("SalePrice ~",var.int,"TotalBsmtSF * BsmtUnfSF +","TotalBsmtSF * BsmtUnfSF")), mtry= floor(37/3), data=train.f.num)
+
+rf.pred.int <- predict(rf.interact,newdata=data[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((rf.pred.int-test.sale$SalePrice)^2))
+```
+Interactions didn't improve, in fact worsened, test RMSE with multiple regression.
+
+
+# Back to OLS
+```{r}
+sim.ols <- lm(SalePrice~GrLivArea, data=data[1:nrow(train),])
+sim.ols.pred <- predict(sim.ols,newdata=data[(nrow(train)+1):nrow(data),])
+
+sqrt(mean((sim.ols.pred - test.sale$SalePrice)^2))
+
+
+varpaste <- paste(paste(imp5[1:4],"+"))
+
+mult.ols <- lm(formula(paste(c("SalePrice~",varpaste,imp5[5])), collapse=" "),data=data[1:nrow(train),])
+mult.ols.pred <- predict(mult.ols,newdata=data[(nrow(train)+1):nrow(data),])
+sqrt(mean((mult.ols.pred - test.sale$SalePrice)^2))
+
+
+
+
+```
+From all of the models tested, the best performing model is a simple linear regression model with just GrLivArea. Intuitively, this makes sense because the bigger house would have higher costs, so the price should be more expensive. All of these other predictors in the data might contain multicollinearity. For example, bigger houses should have more bedrooms, garage size, and the list goes on. Going back to important variables generated by randomforest, each variable will be added only and if only adding them improve test RMSE.
+
+# OLS Automation
+```{r}
+important.var.nogrlivarea <- important.var[-which(important.var == "GrLivArea")]
+important.var.nogrlivarea <- important.var.nogrlivarea[-which(important.var.nogrlivarea == "GarageCars")]
+
+rmsepara <-sqrt(mean((sim.ols.pred - test.sale$SalePrice)^2))
+modelpara <- unlist(strsplit(toString(sim.ols$call),","))[2]
+
+
+
+
+
+
+rmsepara <-sqrt(mean((sim.ols.pred - test.sale$SalePrice)^2))
+modelpara <- unlist(strsplit(toString(sim.ols$call),","))[2]
+
+
+
+
+for (i in important.var.nogrlivarea){
+  formulapara <- (c(modelpara,paste("+",i)))
+  formulapara2 <- as.formula(paste(formulapara,collapse = ""))
+  ols.mod <- lm(formulapara2, data=data[1:nrow(train),])
+  testpred <- predict(ols.mod,newdata=data[(nrow(train)+1):nrow(data),])
+  test.rmse <- sqrt(mean((testpred-test.sale$SalePrice)^2))
+  print(test.rmse)
+
+  if ( test.rmse < rmsepara){
+    rmsepara <- test.rmse
+    modelpara <- formulapara2
+  }
+}
+
+ 
+
+modelpara
+rmsepara
+
+```
+With the multiple linear regression, the best model is:
+SalePrice ~ GrLivArea + LotArea + HalfBath + LotFrontage + LandSlope + 
+    X3SsnPorch + Utilities + YrSold + MoSold + MiscVal
+Test RMSE is : 43321.43
+
+This test RMSE is still quite high for predicting house price.
+
+
+# Conclusion
+In this analysis, multiple linear regression, lasso regression, random forest regression, nonlinearity evaluation, and interaction between quantitative variables were explored to enhance test RMSE. Despite using complex models and regression methods, the best performing was a simple regression model with SalePrice ~ GrLivArea. Once the discovery of this, the model was improved using multiple linear regression by implementing automation of adding variables in an order of importance from random forest when the added model resulted better test RMSE. Such method improved test RMSE, but the test RMSE is still high as a prediction model.
+
+# Area of Improvement
+
+1. Condensing data to reduce the dimension through autoencoder and PCA then regressing with them could be test. 
+2. Eliminating many qualitative variables. There are multiple qualitative predictors that have high levels which will conly worsen the model by introducing too many dummy variables. Having many dummy variables exacerbate interpretability even though the model meets regression assumptions.
+3. Interaction between quantitative and qualitative varaibles. Since quantitative variable interactions didn't offer much, I suspect this could enhance the test RMSE.
+4. Finding more reliable predictors. If bias is the problem, which I suspect since lowering variance methods like lasso and randomforest didn't offer much, the only way to solve this issue is discovering more reliable predictors.
+
+
+
+
+
+
+
+
+
